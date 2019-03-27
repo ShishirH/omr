@@ -1450,6 +1450,9 @@ omrsysinfo_get_number_CPUs_by_type(struct OMRPortLibrary *portLibrary, uintptr_t
 #define MEMFREE_PREFIX		"MemFree:"
 #define MEMFREE_PREFIX_SZ	(sizeof(MEMFREE_PREFIX) - 1)
 
+#define MEMAVAIL_PREFIX		"MemAvailable:"
+#define MEMAVAIL_PREFIX_SZ	(sizeof(MEMAVAIL_PREFIX) - 1)
+
 #define SWAPTOTAL_PREFIX	"SwapTotal:"
 #define SWAPTOTAL_PREFIX_SZ	(sizeof(SWAPTOTAL_PREFIX) - 1)
 
@@ -1476,6 +1479,7 @@ retrieveLinuxMemoryStatsFromProcFS(struct OMRPortLibrary *portLibrary, struct J9
 	int32_t rc = 0;
 	FILE *memStatFs = NULL;
 	char lineString[MAX_LINE_LENGTH] = {0};
+	BOOLEAN isMemAvailableSupported = FALSE;
 
 	/* Open the memstat file on Linux for reading; this is readonly. */
 	memStatFs = fopen(MEMSTATPATH, "r");
@@ -1511,7 +1515,8 @@ retrieveLinuxMemoryStatsFromProcFS(struct OMRPortLibrary *portLibrary, struct J9
 
 			/* The values are in Kb. */
 			memInfo->totalPhysical *= ONE_K;
-		} else if (0 == strncmp(tmpPtr, MEMFREE_PREFIX, MEMFREE_PREFIX_SZ)) {
+		} else if ((FALSE == isMemAvailableSupported)
+				&& (0 == strncmp(tmpPtr, MEMFREE_PREFIX, MEMFREE_PREFIX_SZ))) {
 			/* Skip the whitespaces until we hit the MemFree value. */
 			tmpPtr += MEMFREE_PREFIX_SZ;
 			memInfo->availPhysical = strtol(tmpPtr, &endPtr, COMPUTATION_BASE);
@@ -1524,6 +1529,20 @@ retrieveLinuxMemoryStatsFromProcFS(struct OMRPortLibrary *portLibrary, struct J9
 
 			/* The values are in Kb. */
 			memInfo->availPhysical *= ONE_K;
+		} else if (0 == strncmp(tmpPtr, MEMAVAIL_PREFIX, MEMAVAIL_PREFIX_SZ)) {
+			/* Skip the whitespaces until we hit the MemFree value. */
+			tmpPtr += MEMAVAIL_PREFIX_SZ;
+			memInfo->availPhysical = strtol(tmpPtr, &endPtr, COMPUTATION_BASE);
+			if ((LONG_MIN == memInfo->availPhysical) || (LONG_MAX == memInfo->availPhysical)) {
+				Trc_PRT_retrieveLinuxMemoryStats_invalidRangeFound("MemAvailable");
+				rc = (ERANGE == errno) ? OMRPORT_ERROR_SYSINFO_PARAM_HAS_INVALID_RANGE :
+					 OMRPORT_ERROR_SYSINFO_ERROR_READING_MEMORY_INFO;
+				goto _cleanup;
+			} /* end outer-if */
+
+			/* The values are in Kb. */
+			memInfo->availPhysical *= ONE_K;
+			isMemAvailableSupported = TRUE;
 		} else if (0 == strncmp(tmpPtr, SWAPTOTAL_PREFIX, SWAPTOTAL_PREFIX_SZ)) {
 			/* Skip the whitespaces until we hit the SwapTotal value. */
 			tmpPtr += SWAPTOTAL_PREFIX_SZ;
@@ -1578,6 +1597,13 @@ retrieveLinuxMemoryStatsFromProcFS(struct OMRPortLibrary *portLibrary, struct J9
 			memInfo->buffered *= ONE_K;
 		} /* end if else-if */
 	} /* end while() */
+
+	/* If kernel supports MemoryAvailable field in /proc/meminfo, use that.
+	 * Otherwise, available memory can be calculated as MemFree + Cached + Buffered.
+	 */
+	if (FALSE == isMemAvailableSupported) {
+		memInfo->availPhysical += (memInfo->cached + memInfo->buffered);
+	}
 
 	/* Set hostXXX fields with memory stats from proc fs.
 	 * These may be used for calculating available physical memory on the host.
